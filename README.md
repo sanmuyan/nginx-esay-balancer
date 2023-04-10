@@ -84,18 +84,23 @@ cp lua-resty-http/* openresty_path/lualib/resty/
 }
 ```
 
-### 基于redis
+### 持久化配置文件
 
-启动时会读取一次redis中的配置并记录`latest_update_time`，当`update_time`大于`latest_update_time`时触发热更新
+启动时会根据 `init_worker_by_lua_block {}`  中的配置读取配置文件或者 redis
 
-```shell
-redis_cli set KEY:config CONFIG
-redis_cli set KEY:update_time $(date +%s)
+```lua
+config_type = "file"
+config_file = "./conf/config.json"
+--config_type = "redis"
+--redis_host = "127.0.0.1"
+--redis_port = "6379"
+--redis_key = "balancer"
+--balancer.init_worker()
 ```
 
 ### 基于接口
 
-设置 `x-save: 1` 则保存到redis，不设置直接更新内存中的配置
+设置 `x-save: 1` 则会持久化配置文件，不设置直接更新内存中的配置
 
 ```shell
 curl -XPOST 'http://127.0.0.1:9001/config' \

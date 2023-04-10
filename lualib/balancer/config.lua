@@ -26,18 +26,6 @@ end
 
 local function handle_redis_config()
     local red = redis_connect()
-    if latest_update_time > 0 then
-        local redis_update_time, err = red:get(redis_key .. ":update_time")
-        redis_update_time = tonumber(redis_update_time)
-        if not redis_update_time then
-            return
-        end
-
-        if redis_update_time <= latest_update_time then
-            return
-        end
-    end
-
     local config, err = red:get(redis_key .. ":config")
     if not config then
         return
@@ -45,14 +33,36 @@ local function handle_redis_config()
     set_config(config)
 end
 
-local function save_config(config_data)
-    local red = redis_connect()
-    local ok, err = red:set(redis_key .. ":config", config_data)
-    if not ok then
-        return ok, err
+local function handle_file_config()
+    local file = io.open(config_file, "r")
+    if not file then
+        ngx.log(ngx.ERR, "failed to open config file: ", config_file)
+        return
     end
-    local ok, err = red:set(redis_key .. ":update_time", ngx.time())
-    return ok, err
+    local config = file:read("*a")
+    file:close()
+    set_config(config)
+end
+
+local function save_config(config_data)
+    if config_type == "redis" then
+        local red = redis_connect()
+        local ok, err = red:set(redis_key .. ":config", config_data)
+        if not ok then
+            ngx.log(ngx.ERR, "failed to save config to redis: ", err)
+            return false
+        end
+        return true
+    elseif config_type == "file" then
+        local file = io.open(config_file, "w")
+        if not file then
+            ngx.log(ngx.ERR, "failed to open config file: ", config_file)
+            return
+        end
+        file:write(config_data)
+        file:close()
+        return true
+    end
 end
 
 local function handle_api_config()
@@ -65,17 +75,16 @@ local function handle_api_config()
     end
 
     local headers = ngx.req.get_headers()
-    if headers["x-save"] == "1" and redis_key then
-        local ok, err = save_config(config)
+    if headers["x-save"] == "1" then
+        local ok = save_config(config)
         if not ok then
-            ngx.log(ngx.ERR, "failed to save config to redis: ", err)
             return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
         end
-    else
-        local success, err = set_config(config)
-        if not success then
-            return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
-        end
+    end
+
+    local success, err = set_config(config)
+    if not success then
+        return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
     end
     ngx.say("success")
 end
@@ -86,14 +95,13 @@ function _M.call()
 end
 
 function _M.init_worker()
-    -- 处理数据库中的配置
-    ngx.log(ngx.INFO, "redis_key: ", redis_key)
-    if redis_key then
-        local ok, err = ngx.timer.every(1, handle_redis_config)
-        if not ok then
-            ngx.log(ngx.ERR, "failed to create the timer: ", err)
-            return
-        end
+    -- 处理持久化配置
+    if config_type == "redis" then
+        local hdl, err = ngx.timer.at(0, handle_redis_config)
+    elseif config_type == "file" then
+        handle_file_config()
+    else
+        ngx.log(ngx.WARN, "unknown config_type: ", config_type)
     end
 end
 
