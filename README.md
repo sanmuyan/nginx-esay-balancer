@@ -59,12 +59,14 @@ cp lua-resty-http/* openresty_path/lualib/resty/
             },
             "servers": [
                 {
-                    "server": "127.0.0.1",
-                    "port": 10001
+                    "addr": "127.0.0.1",
+                    "port": 10001,
+                    "weight": 10
                 },
                 {
-                    "server": "127.0.0.1",
-                    "port": 10002
+                    "addr": "127.0.0.1",
+                    "port": 10002,
+                    "weight": 1
                 }
             ]
         }

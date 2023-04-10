@@ -87,7 +87,7 @@ end
 
 function _M.init_worker()
     -- 处理数据库中的配置
-    ngx.log(ngx.INFO, "redis_host: ", redis_key)
+    ngx.log(ngx.INFO, "redis_key: ", redis_key)
     if redis_key then
         local ok, err = ngx.timer.every(1, handle_redis_config)
         if not ok then

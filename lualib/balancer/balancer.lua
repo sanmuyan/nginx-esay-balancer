@@ -9,37 +9,23 @@ local latest_sync_time = 0
 local spawn = ngx.thread.spawn
 
 local function is_server_up(backend_name, server_id)
-    if backends[backend_name]["servers_status"][server_id].status == "up" then
+    if backends[backend_name]["servers"][server_id].status == "up" then
         return true
     end
     return false
 end
 
-local function update_ready_servers(backend_name)
-    local ready_servers = {}
-    local servers = backends[backend_name]["servers_status"]
-    for server_id, server in pairs(servers) do
-        if is_server_up(backend_name, server_id) then
-            ready_servers[#ready_servers + 1] = server
-        end
-    end
-    backends[backend_name]["ready_servers"] = ready_servers
-    ngx.log(ngx.INFO, "backend_name: ", backend_name, " ready_servers: ", cjson.encode(ready_servers))
-end
-
 local function server_down(backend_name, server_id)
     if is_server_up(backend_name, server_id) then
         ngx.log(ngx.WARN, "server down: ", server_id)
-        backends[backend_name]["servers_status"][server_id].status = "down"
-        update_ready_servers(backend_name)
+        backends[backend_name]["servers"][server_id].status = "down"
     end
 end
 
 local function server_up(backend_name, server_id)
     if not is_server_up(backend_name, server_id) then
         ngx.log(ngx.WARN, "server up: ", server_id)
-        backends[backend_name]["servers_status"][server_id].status = "up"
-        update_ready_servers(backend_name)
+        backends[backend_name]["servers"][server_id].status = "up"
     end
 end
 
@@ -113,7 +99,7 @@ local function start_health_check(check_time, backend_name, server_id, server, c
     while true do
         ngx.log(ngx.DEBUG, "start check: ", server_id, " health_check: ", cjson.encode(config), " success_count: ",
             success_count, " fail_count: ", fail_count)
-        if check_time ~= latest_sync_time then
+        if check_time ~= latest_sync_time or ngx.worker.exiting() then
             return
         end
         local ok = false
@@ -154,9 +140,13 @@ local function sync_config()
         ngx.log(ngx.WARN, "no config data found")
         return
     end
-    local new_config, err = cjson.decode(config_data)
-    if not new_config then
-        ngx.log(ngx.ERR, "could not parse config data: ", err)
+
+    local new_config = nil
+    local ok = pcall(function()
+        new_config = cjson.decode(config_data)
+    end)
+    if not ok or not new_config then
+        ngx.log(ngx.ERR, "could not parse config data")
         return
     end
 
@@ -167,7 +157,7 @@ local function sync_config()
 
     latest_sync_time = ngx.time()
     ngx.log(ngx.INFO, "new sync config: ", latest_sync_time)
-    
+
     local new_hosts = {}
     local new_backends = {}
 
@@ -183,24 +173,23 @@ local function sync_config()
             end
         end
 
-        local servers_status = {}
-        local ready_servers = {}
+        local servers = {}
         local new_backend = {}
-        new_backend["servers_status"] = servers_status
-        new_backend["ready_servers"] = ready_servers
+        new_backend["servers"] = servers
+        new_backend["best_server"] = nil
         new_backends[backend.backend_name] = new_backend
 
         for _, server in pairs(backend.servers) do
             local server_id = backend.backend_name .. "_" .. server.addr .. "_" .. server.port
-            servers_status[server_id] = {
+            local weight = server.weight or 1
+            servers[server_id] = {
                 addr = server.addr,
                 port = server.port,
-                status = "up"
+                status = "up",
+                current_weight = 0,
+                effective_weight = weight
             }
-        end
 
-        for server_id, server in pairs(servers_status) do
-            ready_servers[#ready_servers + 1] = server
             -- 定时检查后端服务器的健康状态
             if backend.health_check then
                 if backend.health_check.enable == true then
@@ -232,20 +221,40 @@ function _M.init_worker()
 
 end
 
-function _M.balance()
-    -- 获取Host对应的配置信息
-    local ready_servers = {}
-    local host = ngx.var.Host
+local function get_backend(backend_name)
+    local servers = nil
     local ok = pcall(function()
-        ready_servers = backends[hosts[host]]["ready_servers"]
+        servers = backends[backend_name]["servers"]
     end)
-    if not ok or not ready_servers[1] then
-        ngx.log(ngx.INFO, "no servers found for service: ", host)
+    if not ok then
+        return nil
+    end
+
+    -- 使用加权轮询算法选择一个后端服务器
+    local total_weight = 0
+    local best_server = backends[backend_name].best_server
+    for _, server in pairs(servers) do
+        if server.status ~= "up" then
+            goto continue
+        end
+        total_weight = total_weight + server.effective_weight
+        server.current_weight = server.current_weight + server.effective_weight
+        if not best_server or server.current_weight > best_server.current_weight then
+            best_server = server
+        end
+        ::continue::
+    end
+    best_server.current_weight = best_server.current_weight - total_weight
+    backends[backend_name].best_server = best_server
+    return best_server
+end
+
+function _M.balance()
+    local server = get_backend(hosts[ngx.var.host])
+    if not server then
+        ngx.log(ngx.ERR, "no backend server found")
         return ngx.exit(ngx.HTTP_SERVICE_UNAVAILABLE)
     end
-    ngx.log(ngx.DEBUG, "ready_servers: ", cjson.encode(ready_servers))
-    -- 使用随机算法选择一个后端服务器
-    local server = ready_servers[math.random(#ready_servers)]
     local ok, err = ngx_balancer.set_current_peer(server.addr, server.port)
     if not ok then
         ngx.log(ngx.ERR, "failed to set the current peer: ", err)
