@@ -210,7 +210,11 @@ end
 
 function _M.init_worker()
     -- 初始化启动配置
-    balancer_config.init_worker()
+    local ok, err = ngx.timer.at(0, balancer_config.init_worker)
+    if not ok then
+        ngx.log(ngx.ERR, "failed to create the timer: ", err)
+        return
+    end
 
     -- 每秒同步一次配置
     local ok, err = ngx.timer.every(1, sync_config)
@@ -222,30 +226,29 @@ function _M.init_worker()
 end
 
 local function get_backend(backend_name)
-    local servers = nil
-    local ok = pcall(function()
-        servers = backends[backend_name]["servers"]
+    local best_server
+    pcall(function()
+        local servers = backends[backend_name]["servers"]
+        -- 使用加权轮询算法选择一个后端服务器
+        local total_weight = 0
+        best_server = backends[backend_name].best_server
+        for _, server in pairs(servers) do
+            if server.status ~= "up" then
+                goto continue
+            end
+            total_weight = total_weight + server.effective_weight
+            server.current_weight = server.current_weight + server.effective_weight
+            if not best_server or server.current_weight > best_server.current_weight then
+                best_server = server
+            end
+            ::continue::
+        end
+        if total_weight == 0 then
+            best_server = nil
+        end
+        best_server.current_weight = best_server.current_weight - total_weight
+        backends[backend_name].best_server = best_server
     end)
-    if not ok then
-        return nil
-    end
-
-    -- 使用加权轮询算法选择一个后端服务器
-    local total_weight = 0
-    local best_server = backends[backend_name].best_server
-    for _, server in pairs(servers) do
-        if server.status ~= "up" then
-            goto continue
-        end
-        total_weight = total_weight + server.effective_weight
-        server.current_weight = server.current_weight + server.effective_weight
-        if not best_server or server.current_weight > best_server.current_weight then
-            best_server = server
-        end
-        ::continue::
-    end
-    best_server.current_weight = best_server.current_weight - total_weight
-    backends[backend_name].best_server = best_server
     return best_server
 end
 

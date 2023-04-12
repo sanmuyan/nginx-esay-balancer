@@ -97,7 +97,7 @@ end
 function _M.init_worker()
     -- 处理持久化配置
     if config_type == "redis" then
-        local hdl, err = ngx.timer.at(0, handle_redis_config)
+        handle_redis_config()
     elseif config_type == "file" then
         handle_file_config()
     else
