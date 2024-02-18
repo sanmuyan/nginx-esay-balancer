@@ -8,3 +8,5 @@
 !lualib
 !lualib/balancer
 !lualib/balancer/*.lua
+
+!LICENSE
